@@ -1,0 +1,27 @@
+{
+  "name": "learning-harness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node --import tsx src/cli.ts",
+    "toy": "node --import tsx examples/toy-loop.ts",
+    "preview": "node --import tsx examples/terminal-preview.ts",
+    "protocol": "node --import tsx scripts/generate-protocol.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "check": "npm run typecheck && npm test",
+    "fixture:reset": "node scripts/reset-fixture.mjs",
+    "fixture:check": "node fixtures/sample-project/check.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.26.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3"
+  }
+}

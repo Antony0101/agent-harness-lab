@@ -1,0 +1,6 @@
+node_modules/
+generated/
+.harness/
+dist/
+*.tmp
+fixtures/sample-project/sum.mjs

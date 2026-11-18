@@ -1,0 +1,11 @@
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { findCodex, runtimeVersion } from '../src/runtime.ts';
+const { bin, source } = await findCodex();
+const version = await runtimeVersion(bin);
+console.log(`Using ${bin} (${source})`);
+mkdirSync('generated', { recursive: true });
+const result = spawnSync(bin, ['app-server', 'generate-ts', '--out', 'generated/codex'], { stdio: 'inherit' });
+if (result.error || result.status !== 0) throw result.error || new Error('Protocol generation failed');
+writeFileSync('generated/runtime-version.txt', version + '\n');
+console.log('Generated protocol for', version);
