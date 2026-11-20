@@ -1,32 +1,16 @@
-import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { killGroup, message } from './util.js';
+import { message } from './util.js';
+import { runProcess } from './workspace-tools/process.js';
 import type { TurnResult } from './session.js';
 import type { Store } from './store.js';
 
 export type CheckResult = { passed: boolean; code: number | null; timedOut: boolean; output: string };
 export async function runCheck(command: string, args: string[], cwd: string, timeoutMs = 10_000, signal?: AbortSignal): Promise<CheckResult> {
-  if (signal?.aborted) throw new Error('Workflow interrupted');
-  return new Promise((resolveResult, reject) => {
-    const child = spawn(command, args, { cwd, shell: false, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
-    let output = ''; let timedOut = false;
-    const collect = (chunk: Buffer) => { if (output.length < 8000) output += chunk.toString().slice(0, 8000 - output.length); };
-    child.stdout.on('data', collect); child.stderr.on('data', collect);
-    let killTimer: NodeJS.Timeout | undefined;
-    const terminate = () => { killGroup(child.pid, 'SIGTERM'); killTimer ??= setTimeout(() => killGroup(child.pid, 'SIGKILL'), 500); };
-    const timer = setTimeout(() => { timedOut = true; terminate(); }, timeoutMs);
-    const abort = () => terminate();
-    signal?.addEventListener('abort', abort, { once: true });
-    child.on('error', error => { clearTimeout(timer); if (killTimer) clearTimeout(killTimer); signal?.removeEventListener('abort', abort); reject(error); });
-    child.on('close', code => {
-      clearTimeout(timer); if (killTimer) clearTimeout(killTimer); signal?.removeEventListener('abort', abort);
-      if (signal?.aborted) reject(new Error('Workflow interrupted'));
-      else resolveResult({ passed: code === 0 && !timedOut, code, timedOut, output });
-    });
-  });
+  const result = await runProcess(command, args, cwd, { timeoutMs, signal, maxBytes: 8000 });
+  return { passed: result.code === 0 && !result.timedOut, code: result.code, timedOut: result.timedOut, output: result.output };
 }
 
 export type TaskRecord = {

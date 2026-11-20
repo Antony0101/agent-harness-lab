@@ -11,12 +11,12 @@ Use the existing ChatGPT subscription for eligible local Codex access. The proje
 
 Keep the implementation small:
 
-- TypeScript and Node.js.
+- TypeScript and Node.js 22.17 or newer.
 - One terminal interface and one local Codex child process.
 - One active conversation and one active turn at a time.
-- JSON for small records, JSONL for event history, Markdown for durable notes.
+- JSON for small records, JSONL for event history, Markdown for durable notes, and a disposable SQLite FTS5 memory index.
 - A few application-owned tools, introduced one at a time.
-- No database, Redis, queue service, web server, deployment, or agent framework.
+- No database service, Redis, queue service, web server, deployment, or agent framework. SQLite runs inside Node without a separate service.
 
 Prefer code that is easy to inspect over abstractions intended for hypothetical future requirements. Add a module when an actual milestone needs it.
 
@@ -78,6 +78,10 @@ flowchart TD
     User[Terminal input] --> CLI[CLI and command handling]
     CLI --> Controller[Session and task controller]
     Controller --> Context[Context builder]
+    Context --> MemorySvc[Parent-owned MemoryService]
+    CLI --> MemorySvc
+    MemorySvc --> Markdown[Workspace Markdown sources]
+    MemorySvc --> SQLite[Disposable SQLite FTS5 index]
     Context --> Client[App Server client]
     Client <--> Runtime[Local Codex process]
     Runtime <--> Service[OpenAI model service using subscription access]
@@ -86,7 +90,8 @@ flowchart TD
     Events --> Approval[Approval prompt]
     Approval --> Client
     Runtime <--> MCP[Local MCP tool server]
-    MCP --> Notes[Project notes and learning journal]
+    MCP <-->|Authenticated local socket| MemorySvc
+    MCP --> Notes[Legacy learning journal]
 ```
 
 Use one process for the terminal application and a child process for Codex. Add a second child process for the MCP server only when needed. The local MCP process is owned by the application project but can be started by Codex from configuration.
@@ -109,10 +114,17 @@ src/
   events.ts              # event normalization and rendering
   approvals.ts           # operator decisions for runtime requests
   store.ts               # JSON records and JSONL appends
-  context.ts             # explicit project-note selection
+  context.ts             # compose task with selected reference data
+  memory/
+    files.ts             # ordinary Markdown, validation, and atomic saves
+    service.ts           # parent-owned SQLite index, synchronization, recall
+    commands.ts          # explicit terminal memory operations
+    agent.ts             # approval before agent saves, trusted provenance
+    types.ts             # memory records and tool schemas
   tools/
     registry.ts          # application tool contracts and dispatch
     journal.ts           # read/search/add note handlers
+    memory.ts            # MCP adapter to parent-owned memory operations
     server.ts            # MCP adapter
   workflow.ts            # bounded implementation/check/review flow
 examples/
@@ -129,6 +141,13 @@ notes/
   sessions/
   events/
   tasks/
+  memory.sqlite          # rebuildable search index
+<selected-workspace>/memory/
+  facts/
+  decisions/
+  preferences/
+  lessons/
+  summaries/
 ```
 
 Keep credentials out of every application record. Ignore `.harness/`, temporary fixtures, dependencies, and build output in version control. Intentionally authored notes can be committed after review. Decide whether to commit generated protocol files when they first become necessary, and record the generating version either way.
@@ -250,6 +269,8 @@ Define Ctrl+C behavior: interrupt active work first, then allow an explicit exit
 
 **Done when:** The terminal remains responsive, stop requests target the correct active work, and exiting leaves no owned child process running.
 
+**Implemented interface:** Interactive terminals now default to a full-screen TUI built on Node terminal APIs. Conversation, Tools, Memory, Tasks, and Sessions are keyboard-accessible views. The composer supports multiline drafts and command completion; activity is expandable, history scrolls independently of incoming output, and exact-request approval dialogs default to denial. Direct memory/task forms use the existing parent services. `--no-tui`, `--plain`, non-TTY, one-shot, and offline modes retain line output. `npm run tui:preview` exercises the layout and interactions without a model or disk writes. See the README for shortcuts and display limits.
+
 **Learning note:** Explain request cancellation, turn interruption, process termination, and filesystem rollback as separate operations.
 
 ## 11. Milestone 5 — Own local session records and resume
@@ -338,6 +359,8 @@ Configure the MCP server specifically for this project's runtime where supported
 
 **Optional later comparison:** App Server dynamic tools can expose client-owned handlers more directly. The online docs label this path experimental. Inspect version-matched experimental bindings before trying it; MCP is the required route for this plan, so the comparison must not block progress.
 
+**Implemented extension:** The [local tools plan](local-tools-plan.md) adds workspace search, Git inspection, approved npm checks, and revisioned task tracking. The existing MCP server now exposes eleven tools; five new tools execute in the parent process and are also callable directly with `/tool` or offline `--tool`. Task JSON is separate from durable memory and workflow records.
+
 ## 14. Milestone 8 — Add explicit project memory
 
 **Question:** How does useful information survive a new conversation?
@@ -350,11 +373,11 @@ Keep three distinct stores in mind:
 | Application event log | Inspection and debugging |
 | Selected project notes | Deliberate reuse across conversations |
 
-Build `context.ts` to compose the current task with a small, explicitly selected set of notes. Start with one project-decisions file and a fixed character limit. Count characters honestly; do not call the count an exact token estimate.
+Build `context.ts` to compose the current task with a bounded set of workspace memories. The initial fixed project-decisions file has been replaced by one Markdown file per memory and a disposable SQLite search index. Markdown is authoritative; the parent process synchronizes before retrieval. See [workspace memory](../README.md#workspace-memory) for the implemented architecture and commands. Count characters honestly; do not call the count an exact token estimate.
 
 Show which files and sections were supplied. Treat retrieved notes and tool results as data, not higher-priority instructions. Keep the user's task clearly distinguished from imported content. Let the human approve durable memory updates initially so an incorrect inference is not silently made permanent.
 
-Add `/memory` to inspect selected notes. Summaries can be manually authored at first; automated summarization is a later experiment that uses subscription capacity.
+Add `/memory` to inspect configuration and the last recalled sources. Recall up to two recent preferences/decisions within 2,000 characters and up to five matching notes within a total 6,000-character section. Saves are explicit terminal commands or approved `memory_save` calls. Session summaries follow the same explicit save path; there is no automatic generation. All memory operations work offline through `--memory`.
 
 **Experiment:** State a fixture convention in a first conversation. Ask about it in a new conversation without supplying the note, then repeat with explicit context. Inspect the inputs as well as the answer: repository files may independently reveal the same information.
 
@@ -489,7 +512,7 @@ Optional extensions should answer a specific learning question:
 | Experiment with dynamic tools | What changes when tools are dispatched directly to the client? |
 | Read relevant Codex source | How does the runtime implement the events we observed? |
 | Swap the toy model for a local model | What additional work is required to own the real inner loop? |
-| Add a simple terminal UI | How does presentation affect supervision? |
+| Extend the terminal UI | How does presentation affect supervision? |
 | Try a fresh review conversation | How does context isolation affect findings? |
 
 A local-model extension depends on available hardware and a separately chosen runtime. It is optional and does not need API credits. Hosted infrastructure, vector databases, and distributed workers are outside this learning plan.

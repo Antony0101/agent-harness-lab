@@ -9,6 +9,7 @@ if (process.argv.includes('--version')) {
 const send = value => process.stdout.write(JSON.stringify(value) + '\n');
 const thread = { id: 'fake-thread', cwd: process.cwd(), status: { type: 'idle' } };
 let turn;
+let turnNumber = 0;
 let timer;
 const finish = (text, status = 'completed') => {
   clearTimeout(timer);
@@ -29,7 +30,7 @@ input.on('line', line => {
     case 'thread/read': reply({ thread }); break;
     case 'thread/turns/list': reply({ data: [], nextCursor: null }); break;
     case 'turn/start': {
-      turn = { id: 'fake-turn', items: [], status: 'inProgress' };
+      turn = { id: `fake-turn-${++turnNumber}`, items: [], status: 'inProgress' };
       reply({ turn }); send({ method: 'turn/started', params: { threadId: thread.id, turn } });
       const prompt = value.params.input[0].text;
       if (prompt.includes('[disconnect]')) { process.exit(9); return; }

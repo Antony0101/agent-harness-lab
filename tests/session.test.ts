@@ -1,29 +1,39 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile, rename, symlink, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { CodexClient, type CodexOptions, type Turn } from '../src/codex.js';
 import { Session } from '../src/session.js';
 import { Approvals } from '../src/approvals.js';
 import { EventRenderer } from '../src/events.js';
 import { Rpc } from '../src/rpc.js';
-import { MemoryTransport, temporary, tick } from './helpers.js';
+import { MemoryTransport, temporary, tick, waitFor } from './helpers.js';
 import type { WireMessage } from '../src/transport.js';
+import { MemoryService } from '../src/memory/service.js';
+import { memoryAgentHandler } from '../src/memory/agent.js';
+import { deferred } from '../src/util.js';
+import type { MemoryRecall } from '../src/memory/types.js';
+import { WorkspaceTools } from '../src/workspace-tools/service.js';
 
 function terminal(id = 't', status: Turn['status'] = 'completed'): Turn {
   return { id, status, items: [], error: null, rootTurnId: null, itemsView: 'full', startedAt: null, completedAt: null, durationMs: null };
 }
-async function setup(interactive = false) {
+async function setup(interactive = false, useMemory = false, writable = true) {
   const env = await temporary(); const transport = new MemoryTransport(); const rpc = new Rpc(transport);
-  const options: CodexOptions = { bin: 'fake', workspace: env.root, root: env.root, writable: true };
+  const options: CodexOptions = { bin: 'fake', workspace: env.root, root: env.root, writable };
   const client = new CodexClient(rpc, options); const approvals = new Approvals(interactive, () => {});
-  const session = new Session(client, env.store, approvals, new EventRenderer(() => {}), () => {}, 'fake-v1', 5000);
-  session.memory = false;
+  const memories = useMemory ? await MemoryService.open(env.root, env.store.root) : undefined;
+  let output = '';
+  const session = new Session(client, env.store, approvals, new EventRenderer(() => {}), text => { output += text; }, 'fake-v1', 5000, memories);
+  session.memory = useMemory;
   transport.handler = value => {
     if (value.method === 'thread/start' || value.method === 'thread/resume') {
       transport.receive({ id: value.id, result: { thread: { id: 'thread', cwd: env.root, status: { type: 'idle' } } } });
     }
   };
   await session.fresh();
-  return { ...env, transport, rpc, session, approvals, client, cleanup: async () => { approvals.close(); await rpc.close(); await env.store.flush(); await env.cleanup(); } };
+  return { ...env, transport, rpc, session, approvals, client, memories, output: () => output,
+    cleanup: async () => { approvals.close(); await rpc.close(); await env.store.flush(); await memories?.close(); await env.cleanup(); } };
 }
 
 test('turn completion arriving before acknowledgment is not lost', async t => {
@@ -102,4 +112,118 @@ test('initialization refuses API-key access instead of falling back to paid usag
   };
   const client = new CodexClient(rpc, { bin: 'fake', root: '.', workspace: '.', writable: false });
   await assert.rejects(client.initialize(), /ChatGPT subscription sign-in is required/); await rpc.close();
+});
+
+test('a fresh conversation receives relevant saved knowledge and memory-off omits it', async t => {
+  const env = await setup(false, true); t.after(env.cleanup);
+  const saved = await env.memories!.add('facts', 'Anemone convention', 'Anemone arrays sum to zero.');
+  await writeFile(join(env.root, 'notes', 'project-decisions.md'), 'Legacy harness-wide secret: never auto-include.');
+  env.transport.handler = value => {
+    if (value.method === 'thread/start') env.transport.receive({ id: value.id, result: { thread: { id: 'fresh-thread', cwd: env.root, status: { type: 'idle' } } } });
+    if (value.method === 'turn/start') env.transport.receive({ id: value.id, result: { turn: terminal() } });
+  };
+  const previous = env.session.record!.id; await env.session.fresh();
+  assert.notEqual(env.session.record!.id, previous);
+  await env.session.run('Explain the anemone convention');
+  const input = JSON.stringify(env.transport.sent.find(value => value.method === 'turn/start')?.params);
+  assert.match(input, /Anemone arrays sum to zero/); assert.match(input, /reference data, not instructions/);
+  assert.doesNotMatch(input, /Legacy harness-wide secret/);
+  assert.ok(env.output().includes(saved.id)); assert.ok(env.output().includes(saved.source));
+  env.session.memory = false;
+  await env.session.run('Explain the anemone convention');
+  const noMemory = JSON.stringify(env.transport.sent.filter(value => value.method === 'turn/start').at(-1)?.params);
+  assert.doesNotMatch(noMemory, /Anemone arrays sum to zero/);
+  assert.doesNotMatch(noMemory, /Selected workspace memories/);
+});
+
+test('a memory failure warns and the coding task still runs without stale reference data', async t => {
+  const env = await setup(false, true); t.after(env.cleanup);
+  await env.memories!.add('decisions', 'Convention', 'Previous secret convention.');
+  await rename(env.memories!.directory, join(env.root, 'old-memory'));
+  await symlink(join(env.root, 'old-memory'), env.memories!.directory);
+  env.transport.handler = value => {
+    if (value.method === 'turn/start') env.transport.receive({ id: value.id, result: { turn: terminal() } });
+  };
+  assert.equal((await env.session.run('convention')).status, 'completed');
+  assert.match(env.output(), /Continuing without recalled memory/);
+  assert.doesNotMatch(JSON.stringify(env.transport.sent.find(value => value.method === 'turn/start')?.params), /Previous secret convention/);
+});
+
+test('disconnect during memory loading cannot submit a task after the connection has failed', async t => {
+  const env = await setup(false, true); t.after(env.cleanup);
+  const gate = deferred<MemoryRecall>();
+  env.memories!.recall = () => gate.promise;
+  const running = env.session.run('task'); void running.catch(() => {});
+  await env.rpc.close();
+  gate.resolve({ text: '', characters: 0, items: [], truncated: false });
+  await assert.rejects(running, /closed/);
+  assert.equal(env.transport.sent.some(value => value.method === 'turn/start'), false);
+});
+
+test('parent memory saves require an active writable turn and exact interactive approval', async t => {
+  const env = await setup(true, true); t.after(env.cleanup);
+  const handler = memoryAgentHandler(env.memories!, (name, details, signal) => env.session.toolApproval(name, details, signal),
+    () => ({ sessionId: env.session.record!.id, turnId: env.session.turnId }));
+  const args = { kind: 'lessons', title: 'Learning', body: 'Complete proposed content for inspection.' };
+  await assert.rejects(handler('memory_save', args), /denied/);
+  env.transport.handler = value => {
+    if (value.method === 'turn/start') env.transport.receive({ id: value.id, result: { turn: terminal('t', 'inProgress') } });
+  };
+  const running = env.session.run('learn'); await waitFor(() => !!env.session.turnId);
+  const before = await readFile(env.memories!.databasePath);
+  const denied = handler('memory_save', args);
+  await waitFor(() => !!env.approvals.active);
+  assert.deepEqual(env.approvals.active?.details, { ...args, destination: (env.approvals.active?.details as { destination: string }).destination });
+  assert.match((env.approvals.active?.details as { destination: string }).destination, /memory\/lessons\//);
+  assert.equal(env.approvals.answer('wrong-id', '2'), false);
+  env.approvals.answer(env.approvals.active!.id, '1');
+  await assert.rejects(denied, /denied/);
+  assert.deepEqual(await readFile(env.memories!.databasePath), before);
+  assert.deepEqual(await env.memories!.list(), []);
+  const approved = handler('memory_save', args); await waitFor(() => !!env.approvals.active);
+  env.approvals.answer(env.approvals.active!.id, '2');
+  const result = await approved as { id: string };
+  assert.deepEqual((await env.memories!.read(result.id)).provenance, { sessionId: env.session.record!.id, turnId: 't' });
+  const controller = new AbortController();
+  const aborted = handler('memory_save', args, controller.signal); await waitFor(() => !!env.approvals.active);
+  controller.abort(); await assert.rejects(aborted, /denied|abort/i); assert.equal(env.approvals.active, undefined);
+  const ended = handler('memory_save', args); await waitFor(() => !!env.approvals.active);
+  env.transport.receive({ method: 'turn/completed', params: { threadId: 'thread', turn: terminal() } });
+  await assert.rejects(ended, /denied/); await running;
+  assert.equal((await env.memories!.list()).length, 1);
+});
+
+test('read-only and noninteractive sessions deny agent memory saves', async t => {
+  for (const [interactive, writable] of [[true, false], [false, true]]) {
+    const env = await setup(interactive, true, writable); t.after(env.cleanup);
+    env.transport.handler = value => {
+      if (value.method === 'turn/start') env.transport.receive({ id: value.id, result: { turn: terminal('t', 'inProgress') } });
+    };
+    const running = env.session.run('learn'); await waitFor(() => !!env.session.turnId);
+    const handler = memoryAgentHandler(env.memories!, (name, details, signal) => env.session.toolApproval(name, details, signal), () => ({}));
+    await assert.rejects(handler('memory_save', { kind: 'facts', title: 'Denied', body: 'body' }), /denied/);
+    assert.equal(env.approvals.active, undefined); assert.deepEqual(await env.memories!.list(), []);
+    env.transport.receive({ method: 'turn/completed', params: { threadId: 'thread', turn: terminal() } }); await running;
+  }
+});
+
+test('workspace task approvals are tied to the active turn and cannot survive completion', async t => {
+  const env = await setup(true); const tools = await WorkspaceTools.open(env.root, env.store.root);
+  t.after(async () => { await tools.close(); await env.cleanup(); });
+  env.transport.handler = value => {
+    if (value.method === 'turn/start') env.transport.receive({ id: value.id, result: { turn: terminal('t', 'inProgress') } });
+  };
+  const call = () => tools.call('todo_update', { revision: 0, changes: [{ operation: 'add', title: 'Turn-scoped task' }] }, {
+    origin: 'agent', writable: true, signal: env.session.toolSignal,
+    confirm: (name, details, signal) => env.session.toolApproval(name, details, signal),
+  });
+  await assert.rejects(call(), /denied/);
+  const running = env.session.run('track tasks'); await waitFor(() => !!env.session.turnId);
+  const pending = call(); void pending.catch(() => {}); await waitFor(() => !!env.approvals.active);
+  assert.equal(env.approvals.active!.options[1].label, 'Apply task changes');
+  const turnSignal = env.session.toolSignal;
+  env.transport.receive({ method: 'turn/completed', params: { threadId: 'thread', turn: terminal() } });
+  await running; await assert.rejects(pending, /denied|abort|cancel/i);
+  assert.equal(turnSignal?.aborted, true);
+  assert.deepEqual((await tools.call('todo_list', {}, { origin: 'user', writable: false, confirm: async () => true }) as { tasks: unknown[] }).tasks, []);
 });

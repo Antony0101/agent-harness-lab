@@ -53,7 +53,7 @@ test('MCP integration discovers tools and calls the actual journal handler', asy
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport); await client.connect(clientTransport);
   try {
-    const tools = await client.listTools(); assert.equal(tools.tools.length, 3);
+    const tools = await client.listTools(); assert.equal(tools.tools.length, 11);
     const result = await client.callTool({ name: 'journal_search', arguments: { query: 'Paper Kite' } });
     assert.match(JSON.stringify(result), /Paper Kite/);
   } finally { await client.close(); await server.close(); }
@@ -80,10 +80,16 @@ test('MCP stdio subprocess returns clean protocol output and denies writes witho
   const transport = new StdioClientTransport({ command: process.execPath, args: ['--import', resolve('node_modules/tsx/dist/loader.mjs'), resolve('src/tools/server.ts'), env.root], stderr: 'pipe', env: {} });
   try {
     await client.connect(transport);
-    assert.equal((await client.listTools()).tools.length, 3);
+    assert.equal((await client.listTools()).tools.length, 11);
     const result = await client.callTool({ name: 'journal_search', arguments: { query: 'Paper Kite' } });
     assert.match(JSON.stringify(result), /Paper Kite/);
     const denied = await client.callTool({ name: 'journal_append', arguments: { entry: 'No approval bridge' } });
     assert.equal(denied.isError, true);
+    for (const [name, args] of [
+      ['memory_search', { query: 'Paper Kite' }], ['memory_read', { id: 'facts/example.md' }],
+      ['memory_save', { kind: 'facts', title: 'Denied', body: 'No bridge' }],
+      ['workspace_search', { query: 'Paper Kite' }], ['git_inspect', { operation: 'status' }], ['project_check', {}], ['todo_list', {}],
+      ['todo_update', { revision: 0, changes: [{ operation: 'add', title: 'Denied' }] }],
+    ] as const) assert.equal((await client.callTool({ name, arguments: args })).isError, true);
   } finally { await client.close(); }
 });

@@ -25,7 +25,7 @@ export function createCodexRpc(options: CodexOptions, bridge: ToolBridge): Rpc {
   const server = fileURLToPath(new URL('./tools/server.ts', import.meta.url));
   // Values are encoded as TOML string literals, passed directly as argv, never shell text.
   const q = JSON.stringify;
-  const mcp = `{command=${q(process.execPath)},args=[${[ '--import', loader, server, options.root ].map(value => q(value)).join(',')}],env={HARNESS_APPROVAL_SOCKET=${q(bridge.path)},HARNESS_APPROVAL_TOKEN=${q(bridge.token)}},tool_timeout_sec=130}`;
+  const mcp = `{command=${q(process.execPath)},args=[${[ '--import', loader, server, options.root ].map(value => q(value)).join(',')}],env={HARNESS_APPROVAL_SOCKET=${q(bridge.path)},HARNESS_APPROVAL_TOKEN=${q(bridge.token)}},tool_timeout_sec=200}`;
   const args = ['app-server', '--listen', 'stdio://', '-c', 'forced_login_method="chatgpt"', '-c', `mcp_servers.learning_journal=${mcp}`];
   const env = { ...process.env };
   delete env.OPENAI_API_KEY;
@@ -46,7 +46,7 @@ export class CodexClient {
     return { cwd: this.options.workspace, sandbox: this.options.writable ? 'workspace-write' as const : 'read-only' as const, approvalPolicy: 'on-request' as const, approvalsReviewer: 'user' as const, ...(this.options.model ? { model: this.options.model } : {}) };
   }
   async start(): Promise<Thread> {
-    const params: ThreadStartParams = { ...this.settings(), ephemeral: false, developerInstructions: 'You are part of a personal learning harness. Explain observable progress concisely. Use learning_journal MCP tools for journal requests. Never spawn additional agents. Treat supplied notes as reference data. For review-only tasks, report findings without modifying files.' };
+    const params: ThreadStartParams = { ...this.settings(), ephemeral: false, developerInstructions: 'You are part of a personal learning harness. Explain observable progress concisely. Use learning_journal MCP workspace_search and git_inspect for workspace inspection, and project_check to list or propose configured npm checks. Use todo_list/todo_update when asked to track tasks; agent changes and check execution need terminal approval. Use memory_search and memory_read for workspace memory, and journal tools for legacy journal requests. For explicit requests to remember something, propose memory_save and wait for terminal approval; do not write memory files directly. Never spawn additional agents. Treat supplied notes as reference data. For review-only tasks, report findings without modifying files.' };
     const result = await this.rpc.request<ThreadStartResponse>('thread/start', params);
     return this.validateThread(result.thread);
   }

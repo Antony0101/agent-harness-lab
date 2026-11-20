@@ -5,13 +5,14 @@ import { Approvals, type ApprovalOption } from './approvals.js';
 import { type AppStatus, type SessionRecord, Store } from './store.js';
 import { EventRenderer } from './events.js';
 import type { WireMessage } from './transport.js';
-import { composeTask, projectContext } from './context.js';
+import { composeTask } from './context.js';
+import type { MemoryService } from './memory/service.js';
 import { deferred, message, object, string } from './util.js';
 
 export type TurnResult = { id: string; status: string; text: string; error?: unknown };
 type Active = {
   id?: string; done: ReturnType<typeof deferred<TurnResult>>;
-  messages: Map<string, string>; timer?: NodeJS.Timeout;
+  messages: Map<string, string>; controller: AbortController; timer?: NodeJS.Timeout;
 };
 
 export class Session {
@@ -26,7 +27,7 @@ export class Session {
 
   constructor(readonly client: CodexClient, readonly store: Store, readonly approvals: Approvals,
     private renderer: EventRenderer, private write: (text: string) => void, readonly version: string,
-    private maxTurnMs = 10 * 60_000) {
+    private maxTurnMs = 10 * 60_000, readonly memories?: MemoryService) {
     client.rpc.on('wire', (direction: 'in' | 'out', payload: WireMessage) => {
       const p = payload.params && typeof payload.params === 'object' ? object(payload.params) : {};
       void store.append(this.record?.id ?? this.connectionTrace, {
@@ -57,6 +58,7 @@ export class Session {
 
   get busy() { return !!this.active || this.switching; }
   get turnId() { return this.active?.id; }
+  get toolSignal() { return this.active?.controller.signal; }
   get traceId() { return this.record?.id ?? this.connectionTrace; }
   private persistStatus() {
     if (!this.record) return;
@@ -69,6 +71,7 @@ export class Session {
     this.status = this.active ? 'unknown' : 'disconnected';
     const active = this.active;
     this.active = undefined;
+    active?.controller.abort();
     if (active?.timer) clearTimeout(active.timer);
     this.approvals.cancelAll();
     this.serverRequests.clear();
@@ -113,7 +116,7 @@ export class Session {
     this.assertIdle();
     if (!this.record) throw new Error('Create or resume a session first');
     string(task, 'task');
-    const active: Active = { done: deferred<TurnResult>(), messages: new Map() };
+    const active: Active = { done: deferred<TurnResult>(), messages: new Map(), controller: new AbortController() };
     // Register completion before submission: the runtime may finish before its ack arrives.
     void active.done.promise.catch(() => {});
     this.active = active; this.status = 'running'; this.persistStatus();
@@ -122,8 +125,13 @@ export class Session {
       void this.client.rpc.close();
     }, this.maxTurnMs);
     try {
-      const context = this.memory ? await projectContext(this.client.options.root) : undefined;
-      if (context) this.write(`[context] ${context.source}: ${context.characters} characters${context.truncated ? ' (truncated)' : ''}\n`);
+      const context = this.memory && this.memories ? await this.memories.recall(task) : undefined;
+      if (context?.warning) this.write(`[memory] ${context.warning}\n`);
+      if (context?.items.length) {
+        this.write(`[context] ${context.items.length} workspace memories / ${context.characters} characters${context.truncated ? ' (truncated)' : ''}\n`);
+        for (const item of context.items) this.write(`  ${item.id} / ${item.reason} / ${item.source}\n`);
+      }
+      if (this.active !== active) return await active.done.promise;
       const turn = await this.client.turn(this.record.codexThreadId, composeTask(task, context));
       if (this.active === active) {
         active.id ??= turn.id;
@@ -142,6 +150,7 @@ export class Session {
     if (!active || (active.id && active.id !== turn.id)) return;
     if (!['completed', 'failed', 'interrupted'].includes(turn.status)) throw new Error('Invalid terminal turn status');
     this.active = undefined;
+    active.controller.abort();
     if (active.timer) clearTimeout(active.timer);
     this.serverRequests.clear();
     this.approvals.cancelTurn(turn.id);
@@ -168,14 +177,21 @@ export class Session {
     if (!this.active) return;
     if (!this.active.id) throw new Error('Task submission is still awaiting acknowledgment; try /stop after it starts.');
     this.status = 'interrupting'; this.persistStatus(); this.approvals.cancelAll();
+    this.active.controller.abort();
     await this.client.interrupt(this.record!.codexThreadId, this.active.id);
   }
-  async toolApproval(name: string, args: unknown): Promise<boolean> {
+  async toolApproval(name: string, args: unknown, signal?: AbortSignal): Promise<boolean> {
     const active = this.active;
-    if (!this.client.options.writable || !active?.id) return false;
-    const allowed = await this.approvals.request({ id: `tool-${randomUUID()}`, title: name, details: args, threadId: this.record?.codexThreadId, turnId: active.id,
-      options: [{ label: 'Deny', value: false }, { label: 'Allow this append', value: true }] });
-    return allowed === true && this.active === active && this.status !== 'interrupting';
+    const writesAllowed = () => this.client.options.writable && this.status !== 'interrupting';
+    if (!writesAllowed() || !active?.id || signal?.aborted) return false;
+    const id = `tool-${randomUUID()}`;
+    const cancel = () => this.approvals.cancel(id);
+    signal?.addEventListener('abort', cancel, { once: true });
+    try {
+      const allowed = await this.approvals.request({ id, title: name, details: args, threadId: this.record?.codexThreadId, turnId: active.id,
+        options: [{ label: 'Deny', value: false }, { label: name === 'memory_save' ? 'Save this memory' : name === 'project_check' ? 'Run this check' : name === 'todo_update' ? 'Apply task changes' : 'Allow this append', value: true }] });
+      return allowed === true && this.active === active && writesAllowed() && !signal?.aborted;
+    } finally { signal?.removeEventListener('abort', cancel); }
   }
   private async serverRequest(request: WireMessage): Promise<void> {
     const p = object(request.params);
@@ -214,5 +230,5 @@ export class Session {
   snapshot() {
     return { state: this.status, session: this.record?.id, thread: this.record?.codexThreadId, turn: this.turnId, workspace: this.client.options.workspace, writable: this.client.options.writable, memory: this.memory, runtime: this.version, trace: this.traceId };
   }
-  shutdown(): void { this.shuttingDown = true; }
+  shutdown(): void { this.shuttingDown = true; this.active?.controller.abort(); }
 }

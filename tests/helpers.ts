@@ -20,3 +20,10 @@ export async function temporary() {
   return { root, store, cleanup: () => rm(root, { recursive: true, force: true }) };
 }
 export const tick = () => new Promise<void>(resolve => setImmediate(resolve));
+export async function waitFor(predicate: () => boolean): Promise<void> {
+  const deadline = Date.now() + 3000;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error('Timed out waiting for test condition');
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+}

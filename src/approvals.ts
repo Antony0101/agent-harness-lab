@@ -6,6 +6,7 @@ export type ApprovalOption = { label: string; value: unknown };
 export type ApprovalPrompt = {
   id: string; title: string; details: unknown; options: ApprovalOption[];
   threadId?: string; turnId?: string;
+  expiresAt?: number;
 };
 
 export class Approvals extends EventEmitter {
@@ -18,7 +19,7 @@ export class Approvals extends EventEmitter {
     if (this.closed || !this.interactive) return Promise.resolve(prompt.options[0].value);
     const done = deferred<unknown>();
     const timer = setTimeout(() => this.cancel(prompt.id), this.timeoutMs);
-    this.queue.push({ prompt, done, timer });
+    this.queue.push({ prompt: { ...prompt, expiresAt: Date.now() + this.timeoutMs }, done, timer });
     if (this.queue.length === 1) this.show();
     this.emit('change', true);
     return done.promise;

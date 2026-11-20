@@ -2,7 +2,7 @@ import { homedir } from 'node:os';
 import { safeText } from './util.js';
 import type { ApprovalPrompt } from './approvals.js';
 
-type Tone = 'accent' | 'muted' | 'success' | 'warning' | 'error' | 'strong';
+export type Tone = 'accent' | 'muted' | 'success' | 'warning' | 'error' | 'strong';
 const colors: Record<Tone, string> = { accent: '36', muted: '90', success: '32', warning: '33', error: '31', strong: '1' };
 export type TerminalOptions = { color?: boolean; unicode?: boolean; columns?: number | (() => number); home?: string };
 
@@ -98,14 +98,18 @@ export class TerminalUI {
     this.rule('APPROVAL NEEDED', 'warning');
     this.body(prompt.title.replace('item/', '').replace('/requestApproval', '').replaceAll('/', ' '));
     const details = prompt.details && typeof prompt.details === 'object' ? prompt.details as Record<string, unknown> : {};
-    for (const key of ['command', 'cwd', 'reason', 'entry', 'grantRoot']) {
+    const detailKeys = ['command', 'cwd', 'reason', 'entry', 'grantRoot', 'kind', 'title', 'body', 'destination'];
+    for (const key of detailKeys) {
       if (typeof details[key] === 'string') {
         this.body(key, 'muted');
         this.body(this.path(details[key]));
       }
     }
     if (details.permissions) this.body(JSON.stringify(details.permissions, null, 2), 'warning');
-    if (!Object.keys(details).some(key => ['command', 'cwd', 'reason', 'entry', 'grantRoot', 'permissions'].includes(key))) this.body(JSON.stringify(prompt.details, null, 2));
+    for (const [key, value] of Object.entries(details)) if (![...detailKeys, 'permissions'].includes(key)) {
+      this.body(key, 'muted'); this.body(typeof value === 'string' ? value : JSON.stringify(value, null, 2));
+    }
+    if (!Object.keys(details).length) this.body(JSON.stringify(prompt.details, null, 2));
     this.emit('');
     prompt.options.forEach((option, index) => this.emit('    ' + this.paint(`${index + 1}`, index === 0 ? 'muted' : 'accent') + '  ' + safeText(option.label)));
     this.emit('');

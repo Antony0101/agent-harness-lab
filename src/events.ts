@@ -2,7 +2,7 @@ import type { WireMessage } from './transport.js';
 import { object, safeText } from './util.js';
 import { TerminalUI, type TerminalOptions } from './terminal.js';
 
-type RenderOptions = TerminalOptions & { ui?: TerminalUI; verbose?: boolean; now?: () => number };
+type RenderOptions = TerminalOptions & { ui?: TerminalUI; verbose?: boolean; now?: () => number; onEvent?: (event: WireMessage) => void };
 type TextItem = { pending: string; text: string; headed: boolean };
 
 export class EventRenderer {
@@ -13,10 +13,12 @@ export class EventRenderer {
   private ui: TerminalUI;
   private verbose: boolean;
   private now: () => number;
+  private onEvent?: (event: WireMessage) => void;
   constructor(write: (text: string) => void, private debug = false, options: RenderOptions = {}) {
     this.ui = options.ui ?? new TerminalUI(write, options);
     this.verbose = options.verbose ?? debug;
     this.now = options.now ?? Date.now;
+    this.onEvent = options.onEvent;
   }
   private text(key: string, delta: string): void {
     const item = this.messages.get(key) ?? { pending: '', text: '', headed: false };
@@ -51,10 +53,22 @@ export class EventRenderer {
     return start === undefined ? undefined : this.now() - start;
   }
   render(event: WireMessage): void {
+    if (this.onEvent) { this.onEvent(event); return; }
     if (!event.method) return;
     const p = event.params && typeof event.params === 'object' ? object(event.params) : {};
     const key = `${String(p.turnId)}:${String(p.itemId)}`;
     switch (event.method) {
+      case 'harness/tool/started': this.ui.action('Tool', String(p.name)); break;
+      case 'harness/tool/completed': {
+        const result = p.result && typeof p.result === 'object' ? object(p.result) : {};
+        this.ui.result(`Tool ${String(p.name)} completed${typeof result.code === 'number' ? ` (exit ${result.code})` : ''}${result.truncated ? ' / truncated' : ''}`,
+          result.passed !== false, typeof p.elapsedMs === 'number' ? p.elapsedMs : undefined);
+        if (this.verbose) this.ui.preview(JSON.stringify(p.result, null, 2), true);
+        break;
+      }
+      case 'harness/tool/failed':
+        this.ui.result(`Tool ${String(p.name)} failed`, false, typeof p.elapsedMs === 'number' ? p.elapsedMs : undefined);
+        this.ui.body(String(p.error), 'error'); break;
       case 'turn/started':
         this.messages.clear(); this.started.clear(); this.turnStarted = this.now();
         this.ui.rule(`TURN ${String(++this.turns).padStart(2, '0')}  ${this.ui.symbol('·', '/')}  WORKING`, 'accent');
@@ -117,8 +131,11 @@ function errorText(value: unknown): string {
 }
 
 // Playback deliberately knows nothing about the RPC client or tool dispatcher.
-export function replay(events: Iterable<{ direction: string; payload: unknown }>, renderer: EventRenderer): void {
+export function replay(events: Iterable<{ direction: string; method?: string; payload: unknown }>, renderer: EventRenderer): void {
   for (const event of events) {
+    if (event.direction === 'local' && ['tool/started', 'tool/completed', 'tool/failed'].includes(event.method ?? '')) {
+      renderer.render({ method: `harness/${event.method}`, params: object(event.payload) }); continue;
+    }
     if (event.direction !== 'in') continue;
     const payload = object(event.payload);
     if (typeof payload.method === 'string' && !('id' in payload)) renderer.render(payload as WireMessage);
