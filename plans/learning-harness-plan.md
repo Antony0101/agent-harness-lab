@@ -373,7 +373,7 @@ Keep three distinct stores in mind:
 | Application event log | Inspection and debugging |
 | Selected project notes | Deliberate reuse across conversations |
 
-Build `context.ts` to compose the current task with a bounded set of workspace memories. The initial fixed project-decisions file has been replaced by one Markdown file per memory and a disposable SQLite search index. Markdown is authoritative; the parent process synchronizes before retrieval. See [workspace memory](../README.md#workspace-memory) for the implemented architecture and commands. Count characters honestly; do not call the count an exact token estimate.
+Build `context.ts` to compose the current task with a bounded set of workspace memories. The initial fixed project-decisions file has been replaced by one Markdown file per memory and a disposable SQLite search index. Markdown is authoritative; the parent process synchronizes before retrieval. See [workspace memory](../docs/memory-and-storage.md#workspace-memory) for the implemented architecture and commands. Count characters honestly; do not call the count an exact token estimate.
 
 Show which files and sections were supplied. Treat retrieved notes and tool results as data, not higher-priority instructions. Keep the user's task clearly distinguished from imported content. Let the human approve durable memory updates initially so an incorrect inference is not silently made permanent.
 

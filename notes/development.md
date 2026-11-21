@@ -1,5 +1,7 @@
 # Development baseline
 
+This is a historical record of implementation experiments and the environments used. Start with [Getting started](../docs/getting-started.md) for current user setup, or [Contributing](../CONTRIBUTING.md) for development prerequisites. Earlier test counts below describe their milestones, not the current suite size.
+
 Implemented on November 18, 2026 with Node.js `v22.17.0`, npm `10.9.2`, and Codex CLI `0.162.0-alpha.17.2`.
 
 The available Codex executable came from an editor extension. Startup and protocol generation now discover compatible VS Code/WSL extension binaries when Codex is absent from PATH. Use `CODEX_BIN` to choose a specific executable. Matching generated protocol bindings and their version marker live in ignored `generated/`; recreate them with `npm run protocol`.

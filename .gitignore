@@ -4,3 +4,14 @@ generated/
 dist/
 *.tmp
 fixtures/sample-project/sum.mjs
+
+# Local knowledge is private unless a note is deliberately selected for sharing.
+/memory/
+/fixtures/sample-project/memory/
+
+# Local configuration and common generated artifacts.
+.env
+.env.*
+!.env.example
+.DS_Store
+*.log

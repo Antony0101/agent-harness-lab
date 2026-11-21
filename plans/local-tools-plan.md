@@ -1,6 +1,6 @@
 # Local tools for the learning harness
 
-Status: implemented November 19, 2026. See [README](../README.md#local-workspace-tools) for executable examples and [development notes](../notes/development.md) for verification.
+Status: implemented November 19, 2026. See [Tools and MCP](../docs/tools.md#local-workspace-tools) for executable examples and [development notes](../notes/development.md) for verification.
 
 ## Approved design
 
